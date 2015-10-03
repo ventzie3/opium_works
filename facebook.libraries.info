@@ -1,0 +1,5 @@
+name = Facebook PHP SDK
+machine name = facebook
+description = Facebook SDK for PHP
+version = 5.0
+files[php][] = autoload.php

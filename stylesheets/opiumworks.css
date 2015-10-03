@@ -1,0 +1,9 @@
+div.date-pickers div.form-type-date-holder {
+  display: inline-block;
+}
+div.date-pickers div.form-item-date-holder-to {
+  margin-left: 30px;
+}
+#info-table thead a {
+  color: #77aaff;
+}

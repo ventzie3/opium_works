@@ -1,0 +1,5 @@
+name = Opium Works Task
+description = Facebook Canvas Entry Form where users are able to provide information about them.
+core = 7.x
+package = Ventzie's Development
+dependencies[] = libraries

@@ -1,0 +1,611 @@
+<?php
+use Facebook\Authentication\AccessToken;
+use Facebook\PersistentData\FacebookSessionPersistentDataHandler;
+
+/*
+ * Implements hook_menu
+ */
+function opium_works_menu() {
+ $items['opiumworkstasktest'] = array(
+    'title' => 'Opium Works Task',
+    'page callback' => 'opiumworkstask_callback',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/config/opiumworks'] = array(
+    'title' => 'Opium Works Settings',
+    'description' => 'Opium works app settings.',
+    'position' => 'right',
+    'weight' => 1000,
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('access administration pages'),
+    'file' => 'system.admin.inc',
+  );
+  $items['admin/config/opiumworks/settings'] = array(
+    'title' => 'Opium Works Settings',
+    'description' => 'Opium works app settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('opium_works_app_settings'),
+    'access arguments' => array('administer site configuration'),
+  );
+
+  return $items;
+}
+
+/*
+ * Facebook canvas page menu callback;
+ */
+function opiumworkstask_callback() {
+  if(!opium_works_are_app_settings_set()) {
+    drupal_exit();
+  }
+
+  //Sessions need to be started here in order Facebook PHP API to work
+  drupal_session_start();
+
+  $body = '';
+  $head = '';
+  libraries_load('facebook');
+
+  $persistent_data_handler = new FacebookSessionPersistentDataHandler();
+
+  $fb = new Facebook\Facebook(array(
+    'app_id' => variable_get('opiumworks_app_id', ''),
+    'app_secret' => variable_get('opiumworks_app_secret', ''),
+    'default_graph_version' => 'v2.2',
+    'persistent_data_handler' => 'session',
+  ));
+
+  //First we try to get the access token with FacebookCanvasHelper.
+  $helper = $fb->getCanvasHelper();
+  try {
+    $accessToken = $helper->getAccessToken();
+  } catch(Facebook\Exceptions\FacebookResponseException $e) {
+    // When Graph returns an error
+  } catch(Facebook\Exceptions\FacebookSDKException $e) {
+    // When validation fails or other local issues
+  }
+
+  //If access token is not set, we might have in-iframe browsing.
+  //We try next with FacebookJavaScriptHelper.
+  if (! isset($accessToken)) {
+    $helper = $fb->getJavaScriptHelper();
+    try {
+      $accessToken = $helper->getAccessToken();
+    } catch(Facebook\Exceptions\FacebookResponseException $e) {
+      // AccessToken from code have most likely expired or is not valid any more.
+      // Request a new one via CanvasHelper
+      //exit;
+    } catch(Facebook\Exceptions\FacebookSDKException $e) {
+      // When validation fails or other local issues
+    }
+  }
+
+  //If FacebookJavaScriptHelper wasn't able to get the token,
+  //user has probably disabled third party cookies or the form was submitted and redirected.
+  //We try next to get the token from session
+  if (! isset($accessToken)) {
+    $accessToken = _opium_works_get_accesstoken_from_session($persistent_data_handler);
+  }
+  else {
+    //If we succeed in getting the token, we save it in session for later use.
+    _opium_works_save_accesstoken_to_session($persistent_data_handler, $accessToken);
+  }
+
+  //If everything above fails, we use RedirectLoginHelper
+  if (! isset($accessToken)) {
+    $helper = $fb->getRedirectLoginHelper();
+    $permissions = array(); // optional
+    $loginUrl = $helper->getLoginUrl(variable_get('opiumworks_app_url', ''), $permissions);
+
+    $body = '<script type="text/javascript">window.top.location = "' . $loginUrl . '";</script>';
+  }
+  else {
+    $fb->setDefaultAccessToken($accessToken);
+
+    try {
+      $response = $fb->get("/me?fields=id,first_name,last_name")->getDecodedBody();
+    } catch(Facebook\Exceptions\FacebookResponseException $e) {
+      echo 'Message: ' . $e->getMessage();
+      return;
+    } catch(Facebook\Exceptions\FacebookSDKException $e) {
+      echo 'Message: ' . $e->getMessage();
+      return;
+    }
+
+    list($id, $first_name, $last_name, $email, $phone, $created) = _opium_works_get_default_form_values($response);
+
+    $is_app_admin = _opium_works_is_user_app_admin($fb, $id);
+
+    $form = drupal_get_form(
+      'opium_works_user_info_form',
+      $id,
+      $first_name,
+      $last_name,
+      $email,
+      $phone,
+      $created,
+      $is_app_admin
+    );
+
+    $body .= drupal_render($form);
+
+    if($is_app_admin) {
+      if(!empty($_GET['requestxml'])) {
+        opium_works_render_xml();
+      }
+      else {
+        $body .= opium_works_get_data_table();
+      }
+    }
+  }
+
+  $output_render_array = array(
+    'canvas' => array(
+      '#theme' => 'opium_works_canvas',
+      '#body' => $body,
+      '#head' => $head,
+    )
+  );
+
+  print drupal_render($output_render_array);
+  drupal_exit();
+}
+
+/*
+ * Implements hook_theme
+ */
+function opium_works_theme() {
+  return array(
+    'opium_works_canvas' => array(
+      'variables' => array('body' => '', 'head' => ''),
+      'template' => 'opium-works-canvas',
+      'path' => drupal_get_path('module','opium_works') . '/templates',
+    ),
+  );
+}
+
+/*
+ * Implements hook_preprocess_HOOK
+ *
+ * Here we get rid of unnecessary javascripts
+ * and styles from other contributed modules and we
+ * add only what we need for the canvas page
+ */
+function opium_works_preprocess_opium_works_canvas(&$variables) {
+  //Add only default javascript
+  $javascript = &drupal_static('drupal_add_js');
+  $javascript = array();
+  $jquery_added = &drupal_static('drupal_add_js:jquery_added');
+  $jquery_added = FALSE;
+  $libraries = &drupal_static('drupal_add_library');
+  $libraries = array();
+
+  drupal_add_js('misc/form.js');
+  drupal_add_js('misc/collapse.js');
+  drupal_add_js('misc/tableheader.js');
+  drupal_add_js(array('canvas' => array('default_js_added' => TRUE)), 'setting');
+  drupal_add_js(drupal_get_path('module','opium_works') . '/javascripts/opiumworks.js');
+
+  //Add only css from core modules and active theme
+  $path_to_theme = drupal_get_path('theme',$GLOBALS['theme']);
+  $css = &drupal_static('drupal_add_css');
+  foreach ($css as $path => $style) {
+    if(!(strpos($path, 'modules/') === 0 || strpos($path, $path_to_theme) === 0)) {
+      unset($css[$path]);
+    }
+  }
+
+  drupal_add_css(drupal_get_path('module','opium_works') . '/stylesheets/opiumworks.css');
+
+  drupal_add_library('system', 'ui.datepicker');
+
+  $variables['js'] = drupal_get_js();
+  $variables['css'] = drupal_get_css();
+}
+
+/*
+ * The form description
+ */
+function opium_works_user_info_form($form, $form_state, $id, $first_name, $last_name, $email, $phone, $created, $is_app_admin) {
+  $form['#fbuid'] = $id;
+
+  $form['form_header'] = array(
+    '#markup' => '<h1 class="form-header"><b>' . t('Please provide your information') . ':</b></h1>',
+  );
+
+  $disabled = !empty($created) && date("Ymd") == date("Ymd", $created);
+  $form['#is_form_disabled'] = $disabled;
+
+  $form['form_info'] = array(
+    '#title' => t('Your Info Form. Click to Expand'),
+    '#type' => 'fieldset',
+    '#description' => t('Please fill out the form.'),
+    '#collapsible' => TRUE,
+    '#collapsed' => $is_app_admin,
+  );
+
+  $form['form_info']['first_name'] = array(
+    '#type' => 'textfield',
+    '#title' => t('First Name'),
+    '#description' => t('Please enter your first name.'),
+    '#size' => 60,
+    '#maxlength' => 99,
+    '#required' => TRUE,
+    '#disabled' => $disabled,
+  );
+  if(!empty($first_name)) {
+    $form['form_info']['first_name']['#default_value'] = $first_name;
+  }
+
+  $form['form_info']['last_name'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Last Name'),
+    '#description' => t('Please enter your last name.'),
+    '#size' => 60,
+    '#maxlength' => 99,
+    '#required' => TRUE,
+    '#disabled' => $disabled,
+  );
+  if(!empty($last_name)) {
+    $form['form_info']['last_name']['#default_value'] = $last_name;
+  }
+
+  $form['form_info']['email'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Email'),
+    '#description' => t('Please enter your email.'),
+    '#size' => 60,
+    '#maxlength' => 99,
+    '#required' => TRUE,
+    '#disabled' => $disabled,
+  );
+  if(!empty($email)) {
+    $form['form_info']['email']['#default_value'] = $email;
+  }
+
+  $form['form_info']['phone'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Phone'),
+    '#description' => t('Please enter your phone number (Optional).'),
+    '#size' => 60,
+    '#maxlength' => 99,
+    '#required' => FALSE,
+    '#disabled' => $disabled,
+  );
+  if(!empty($phone)) {
+    $form['form_info']['phone']['#default_value'] = $phone;
+  }
+
+  $form['form_info']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Submit'),
+    '#disabled' => $disabled,
+  );
+
+  if($disabled) {
+    $form['form_info']['form_warning'] = array(
+      '#markup' => '<p class="warning">' . t('You can provide information only once a day') . '</p>',
+    );
+  }
+
+  return $form;
+}
+
+/*
+ * Form validate handler
+ */
+function opium_works_user_info_form_validate($form, &$form_state) {
+  if(!valid_email_address($form_state['values']['email'])) {
+    form_set_error('email', t('Invalid email.'));
+  }
+
+  if(!empty($form_state['values']['phone']) && !preg_match('@^[\d() -]+$@', $form_state['values']['phone'])) {
+    form_set_error('phone', t('Invalid phone number.'));
+  }
+}
+
+/*
+ * Form submit handler.
+ */
+function opium_works_user_info_form_submit($form, &$form_state) {
+  db_merge('opium_works_users_info')
+    ->key(array('fbuid' => $form['#fbuid']))
+    ->fields(array(
+      'fbuid' => $form['#fbuid'],
+      'first_name' => $form_state['values']['first_name'],
+      'last_name' => $form_state['values']['last_name'],
+      'email' => $form_state['values']['email'],
+      'phone' => $form_state['values']['phone'],
+      'created' => REQUEST_TIME,
+    ))
+    ->execute();
+
+  drupal_set_message(t('Thank you for fillling out the form.'));
+}
+
+/*
+ * Helper function for getting form's default values.
+ */
+function _opium_works_get_default_form_values($response) {
+  $return = array();
+  $return[] = $id = $response['id'];
+
+  $row_set = db_query("SELECT first_name, last_name, email, phone, created FROM opium_works_users_info WHERE fbuid = :fbuid", array(':fbuid' => $id))->fetchAssoc();
+
+  $return[] = !empty($row_set['first_name']) ? $row_set['first_name'] : (!empty($response['first_name']) ? $response['first_name'] : NULL);
+  $return[] = !empty($row_set['last_name']) ? $row_set['last_name'] : (!empty($response['last_name']) ? $response['last_name'] : NULL);
+  $return[] = !empty($row_set['email']) ? $row_set['email'] : (!empty($response['email']) ? $response['email'] : NULL);
+  $return[] = !empty($row_set['phone']) ? $row_set['phone'] : (!empty($response['phone']) ? $response['phone'] : NULL);
+
+  $return[] = !empty($row_set['created']) ? $row_set['created'] : NULL;
+
+  return $return;
+}
+
+/*
+ * Checks if facebook user is an admin
+ */
+function _opium_works_is_user_app_admin($fb, $uid) {
+  $fbApp = $fb->getApp();
+  $appAcessToken = $fbApp->getAccessToken();
+  $appID = $fbApp->getId();
+
+  try {
+    $response = $fb->get("{$appID}/roles", $appAcessToken)->getDecodedBody();
+  } catch(Facebook\Exceptions\FacebookResponseException $e) {
+    echo 'Message: ' . $e->getMessage();
+    return FALSE;
+  } catch(Facebook\Exceptions\FacebookSDKException $e) {
+    echo 'Message: ' . $e->getMessage();
+    return FALSE;
+  }
+
+  foreach ($response['data'] as $info) {
+    if($info['app_id'] == $appID && $info['user'] == $uid && $info['role'] == 'administrators') {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/*
+ * Helper function for getting the AccessToken object from session
+ * We cannot save the object into the $_SESSION variable because for that to happen
+ * first we need to incude the file with AccessToken class before session_start() call
+ * which happens very early in the bootrapping process.
+ */
+function _opium_works_get_accesstoken_from_session($persistent_data_handler) {
+  if($persistent_data_handler->get('token') && $persistent_data_handler->get('expires')
+    && $persistent_data_handler->get('expires') > time()) {
+
+    return new AccessToken($persistent_data_handler->get('token'), $persistent_data_handler->get('expires'));
+  }
+  return NULL;
+}
+
+/*
+ * Helper function for saving access token to session.
+ */
+function _opium_works_save_accesstoken_to_session($persistent_data_handler, $accessToken) {
+  $persistent_data_handler->set('token', $accessToken->getValue());
+  $persistent_data_handler->set('expires', $accessToken->getExpiresAt() ? $accessToken->getExpiresAt()->getTimestamp() : 0);
+}
+
+/*
+ * The function creates the HTML table with FB users who
+ * filled out the canvas form.
+ */
+function opium_works_get_data_table() {
+  $header = array(
+    t('Image'),
+    array('data' => t('First Name'), 'field' => 'ow.first_name'),
+    array('data' => t('Last Name'), 'field' => 'ow.last_name'),
+    array('data' => t('E-mail'), 'field' => 'ow.email'),
+    t('Phone'),
+    array('data' => t('Created/Modified'), 'field' => 'ow.created', 'sort' => 'asc'),
+  );
+
+  $query = db_select('opium_works_users_info', 'ow')->extend('TableSort');
+  $query->fields('ow', array('fbuid', 'first_name', 'last_name', 'email', 'phone', 'created'));
+
+  _opium_works_set_date_conditions($query, 'from');
+  _opium_works_set_date_conditions($query, 'to');
+
+
+  $query = $query->orderByHeader($header);
+
+  $query = $query->extend('PagerDefault')->limit(10);
+  $result = $query->execute();
+
+  $rows = array();
+  $fbuids = array();
+  foreach ($result as $row) {
+    $image = theme('image', array(
+        'path' => "https://graph.facebook.com/{$row->fbuid}/picture?type=small",
+        'alt' => $row->first_name . ' ' . $row->last_name,
+        'title' => $row->first_name . ' ' . $row->last_name,
+      )
+    );
+    $image_link = l($image, 'https://www.facebook.com/' . $row->fbuid, array('html' => TRUE, 'attributes' => array('target'=>'_blank')));
+
+    $rows[$row->fbuid] = array('data' => array(
+      'image' => $image_link,
+      'first_name' => $row->first_name,
+      'last_name' => $row->last_name,
+      'email' => $row->email,
+      'phone' => $row->phone,
+      'created' => format_date($row->created),
+    ));
+
+    $fbuids[] = $row->fbuid;
+  }
+
+  $build['tablesort_table'] = array(
+    '#theme' => 'table',
+    '#header' => $header,
+    '#rows' => $rows,
+    '#attributes' => array('id' => 'info-table'),
+  );
+  $build['pager'] = array('#markup' => theme('pager'));
+
+  return _opium_works_get_date_filter_form() . drupal_render($build);
+}
+
+/*
+ * Return the form for filtering FB users
+ */
+function _opium_works_get_date_filter_form () {
+  $fromdate = theme('textfield', array('element' => array('#autocomplete_path' => FALSE, '#name' => 'from', '#size' => '12', '#attributes' => array('class' => array('date-field')))));
+  $fromdate = theme('form_element', array('element' => array('#title' => 'From Date:', '#children' => $fromdate, '#type' => 'date-holder', '#name' => 'date-holder-from')));
+
+  $todate = theme('textfield', array('element' => array('#autocomplete_path' => FALSE, '#name' => 'to', '#size' => '12', '#attributes' => array('class' => array('date-field')))));
+  $todate = theme('form_element', array('element' => array('#title' => 'To Date:', '#children' => $todate, '#type' => 'date-holder', '#name' => 'date-holder-to')));
+
+  $submit = theme('button', array('element' => array('#button_type' => 'submit', '#name' => 'date-submit', '#value' => 'Filter'  , '#attributes' => array('class' => array('form-date-button')))));
+  $reset  = theme('button', array('element' => array('#button_type' => 'submit', '#name' => 'date-reset' , '#value' => 'Reset'   , '#attributes' => array('class' => array('form-reset-button')))));
+  $xmlbut = theme('button', array('element' => array('#button_type' => 'submit', '#name' => 'xml-button' , '#value' => 'Get XML' , '#attributes' => array('class' => array('form-xml-button')))));
+
+  $menuitem = menu_get_item();
+  $hiddenlink = '<div>' . l('', $menuitem['path'] . '/data.xml', array('query' => array('requestxml' => 'yes'), 'language' => (object)array('language' => FALSE), 'attributes' => array('id' => 'ow-xml-link', 'target'=>'_blank', 'style' => "display:none"))) . '</div>';
+
+  $datepickerinputs = '<div class="date-pickers">' . $fromdate . $todate . '</div>';
+  $hiddeninputs = theme('hidden', array('element' => array('#name' => 'from', '#value' => ''))) . theme('hidden', array('element' => array('#name' => 'to', '#value' => '')));
+
+  $children = '<div class="hidden-inputs">' . $hiddeninputs . '</div>' . '<div class="buttons">' . $submit . $reset . $xmlbut . '</div>';
+
+  return $datepickerinputs . '<div class="date-form">' . theme('form', array('element' => array('#method' => 'GET', '#id' => 'opium-works-form', '#children' => $children))) . '</div>' . $hiddenlink;
+}
+
+/*
+ * Helper function for setting the query where clause.
+ */
+function _opium_works_set_date_conditions($query, $type) {
+  if(!empty($_GET[$type]) && preg_match("@^\d{8}$@", $_GET[$type])) {
+
+    $hms = $type == 'from' ? '000000' : '235959';
+    $date = DateTime::createFromFormat('dmYHis', "{$_GET[$type]}{$hms}");
+
+    $cond = $type == 'from' ? '>=' : '<=';
+    if($date) {
+      $query->condition('created', $date->getTimestamp(), $cond);
+    }
+  }
+}
+
+/*
+ * The fucntion renders XML data for FB canvas app users
+ */
+function opium_works_render_xml() {
+  $dom = new DOMDocument('1.0', 'UTF-8');
+  $user_list = $dom->createElement("fbUserList");
+  $dom->appendChild($user_list);
+
+  $query = db_select('opium_works_users_info', 'ow')
+   ->fields('ow', array('fbuid', 'first_name', 'last_name', 'email', 'phone', 'created'))
+   ->orderBy('created', 'ASC');
+
+  _opium_works_set_date_conditions($query, 'from');
+  _opium_works_set_date_conditions($query, 'to');
+
+  $result = $query->execute();
+
+  foreach ($result as $row) {
+    $user = $dom->createElement("fbUser");
+    $user_list->appendChild($user);
+
+    _opium_works_append_xml_element($dom, $user, 'fbuid', $row->fbuid);
+    _opium_works_append_xml_element($dom, $user, 'first_name', $row->first_name);
+    _opium_works_append_xml_element($dom, $user, 'last_name', $row->last_name);
+    _opium_works_append_xml_element($dom, $user, 'email', $row->email);
+
+    if(!empty($row->phone)) {
+      _opium_works_append_xml_element($dom, $user, 'phone', $row->phone);
+    }
+
+    _opium_works_append_xml_element($dom, $user, 'created', format_date($row->created));
+  }
+
+  drupal_add_http_header('Content-type', 'application/xml; charset=utf-8');
+  echo $dom->saveXML();
+  drupal_exit();
+}
+
+/*
+ * Helper function for creating user nodes in the XML
+ */
+function _opium_works_append_xml_element($dom, $parent, $type, $text) {
+  // create child element
+  $item = $dom->createElement($type);
+  $parent->appendChild($item);
+
+  // create text node
+  $text = $dom->createTextNode($text);
+  $item->appendChild($text);
+}
+
+/*
+ * Module admin panel setiings
+ */
+function opium_works_app_settings() {
+  $form = array();
+
+  $form['opiumworks_app_url'] = array(
+    '#type' => 'textfield',
+    '#title' => t('App URL'),
+    '#default_value' => variable_get('opiumworks_app_url', ''),
+    '#size' => 50,
+    '#maxlength' => 1000,
+    '#description' => t("Please enter app url."),
+  );
+  $form['opiumworks_app_id'] = array(
+    '#type' => 'textfield',
+    '#title' => t('App ID'),
+    '#default_value' => variable_get('opiumworks_app_id', ''),
+    '#size' => 50,
+    '#maxlength' => 1000,
+    '#description' => t("Please enter app id."),
+  );
+  $form['opiumworks_app_secret'] = array(
+    '#type' => 'textfield',
+    '#title' => t('App Secret'),
+    '#default_value' => variable_get('opiumworks_app_secret', ''),
+    '#size' => 50,
+    '#maxlength' => 1000,
+    '#description' => t("Please enter app secret."),
+  );
+
+  return system_settings_form($form);
+}
+
+/*
+ * Returns watning if module settings are not set like fb app id etc.
+ */
+function opium_works_are_app_settings_set() {
+  if(empty(variable_get('opiumworks_app_url', '')) || empty(variable_get('opiumworks_app_id', ''))
+      || empty(variable_get('opiumworks_app_secret', '')) ) {
+
+
+    if(user_access('administer site configuration')) {
+      $body = "<p>" . "Please go to " . l('admin/config/opiumworks/settings', 'admin/config/opiumworks/settings', array('attributes' => array('target'=>'_blank')))
+        . " to set module app settings first.</p>";
+    }
+    else {
+      $body = '';
+    }
+
+    $output_render_array = array(
+      'canvas' => array(
+        '#theme' => 'opium_works_canvas',
+        '#body' => $body,
+        '#head' => '',
+      )
+    );
+
+    print drupal_render($output_render_array);
+
+    return FALSE;
+  }
+
+  return TRUE;
+}

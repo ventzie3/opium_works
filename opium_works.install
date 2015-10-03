@@ -1,0 +1,96 @@
+<?php
+/*
+ * Implements hook_requirements
+ */
+function opium_works_requirements($phase) {
+  $requirements = array();
+  // Ensure translations don't break during installation.
+  $t = get_t();
+
+  // Test if Facebook PHP SDK exists
+  if ($phase == 'install' && !(($library = libraries_detect('facebook')) && !empty($library['installed']))) {
+    $requirements ['facebook'] = array(
+      'title' => $t('Facebook PHP SDK'),
+      'description' => $t('Facebook PHP SDK library is required. Install it first!'),
+      'severity' => REQUIREMENT_ERROR,
+    );
+  }
+
+  // Test PHP version
+  if (version_compare(phpversion(), '5.4.0') < 0) {
+    $requirements ['php'] = array(
+      'title' => $t('PHP'),
+      'value' => ($phase == 'runtime') ? l(phpversion(), 'admin/reports/status/php') : phpversion(),
+    );
+    $requirements ['php']['description'] = $t('Your PHP installation is too old. Facebook PHP SDK requires at least PHP %version.', array('%version' => '5.4'));
+    $requirements ['php']['severity'] = REQUIREMENT_ERROR;
+  }
+
+  //mbstring PHP extesnion is needed for facebook library to work.
+  if (!extension_loaded('mbstring')) {
+    $requirements ['mbstring']['title'] = $t('mbstring');
+    $requirements ['mbstring']['description'] = $t('mbstring PHP extesnion is needed');
+    $requirements ['mbstring']['severity'] = REQUIREMENT_ERROR;
+  }
+
+  return $requirements;
+}
+
+/*
+ * Implements hook_schema
+ */
+function opium_works_schema() {
+  $schema['opium_works_users_info'] = array(
+    'description' => 'A table where information will be stored for canvas app users',
+    'fields' => array(
+      'fbuid' => array(
+        'description' => 'Facebook UID.',
+        'type' => 'int',
+        'size' => 'big',
+        'length' => 20,
+        'not null' => TRUE,
+        'default' => 0),
+      'first_name' => array(
+        'description' => 'User\'s first name.',
+        'type' => 'varchar',
+        'length' => 100,
+        'not null' => TRUE,
+        'default' => ''),
+      'last_name' => array(
+        'description' => 'User\'s last name.',
+        'type' => 'varchar',
+        'length' => 100,
+        'not null' => TRUE,
+        'default' => ''),
+      'email' => array(
+        'description' => 'User\'s email.',
+        'type' => 'varchar',
+        'length' => 100,
+        'not null' => TRUE,
+        'default' => ''),
+      'phone' => array(
+        'description' => 'User\'s phone.',
+        'type' => 'varchar',
+        'length' => 100,
+        'not null' => FALSE,
+        'default' => ''),
+      'created' => array(
+        'description' => 'The Unix timestamp when the entry was created ot modified.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0),
+    ),
+    'indexes' => array(
+      'first_name'  => array('first_name'),
+      'last_name'   => array('last_name'),
+      'created'     => array('created'),
+    ),
+    'unique keys' => array(
+      //'nid_vid' => array('nid', 'vid'),
+      //'vid'     => array('vid')
+    ),
+    'primary key' => array('fbuid'),
+  );
+
+  return $schema;
+}
