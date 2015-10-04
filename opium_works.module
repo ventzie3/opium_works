@@ -84,10 +84,10 @@ function opiumworkstask_callback() {
   //If FacebookJavaScriptHelper wasn't able to get the token,
   //user has probably disabled third party cookies or the form was submitted and redirected.
   //We try next to get the token from session
-  if (! isset($accessToken)) {
+  if (! isset($accessToken) && empty($_POST['signed_request'])) {
     $accessToken = _opium_works_get_accesstoken_from_session($persistent_data_handler);
   }
-  else {
+  elseif(isset($accessToken)) {
     //If we succeed in getting the token, we save it in session for later use.
     _opium_works_save_accesstoken_to_session($persistent_data_handler, $accessToken);
   }
