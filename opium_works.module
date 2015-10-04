@@ -351,6 +351,25 @@ function _opium_works_is_user_app_admin($fb, $uid) {
   $appAcessToken = $fbApp->getAccessToken();
   $appID = $fbApp->getId();
 
+  if(variable_get('opiumworks_make_testusers_admins', FALSE)) {
+    try {
+      $response = $fb->get("{$appID}/accounts/test-users", $appAcessToken)->getDecodedBody();
+    } catch(Facebook\Exceptions\FacebookResponseException $e) {
+      echo 'Message: ' . $e->getMessage();
+      return FALSE;
+    } catch(Facebook\Exceptions\FacebookSDKException $e) {
+      echo 'Message: ' . $e->getMessage();
+      return FALSE;
+    }
+
+    foreach ($response['data'] as $info) {
+      if($info['id'] == $uid) {
+        return TRUE;
+      }
+    }
+
+  }
+
   try {
     $response = $fb->get("{$appID}/roles", $appAcessToken)->getDecodedBody();
   } catch(Facebook\Exceptions\FacebookResponseException $e) {
@@ -366,6 +385,7 @@ function _opium_works_is_user_app_admin($fb, $uid) {
       return TRUE;
     }
   }
+
   return FALSE;
 }
 
@@ -573,6 +593,12 @@ function opium_works_app_settings() {
     '#size' => 50,
     '#maxlength' => 1000,
     '#description' => t("Please enter app secret."),
+  );
+  $form['opiumworks_make_testusers_admins'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Make Test Users Admins'),
+    '#default_value' => variable_get('opiumworks_make_testusers_admins', FALSE),
+    '#description' => t('When you check this option, all app test users will be treated as app admins. Is is used for testing purposes only.'),
   );
 
   return system_settings_form($form);
